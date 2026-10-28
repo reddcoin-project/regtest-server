@@ -1,6 +1,10 @@
 // Reddcoin helpers shared by the routes, bootstrap and scripts
 let crypto = require('crypto')
+let ecc = require('tiny-secp256k1')
 let rdd = require('@reddcoinproject/reddcoinjs-lib')
+
+// P2TR address encoding (addressOf) needs the ECC library
+rdd.initEccLib(ecc)
 
 // Reddcoin Core regtest parameters (chainparams.cpp, CRegTestParams)
 let NETWORK = {
