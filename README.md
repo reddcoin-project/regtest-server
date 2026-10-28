@@ -27,10 +27,13 @@ returns 200. The API key for the `/1/r/*` routes is `satoshi`.
 
 ## Reddcoin regtest notes
 
-- **Proof of stake.** Blocks after height 89 are PoS, staked by the node's wallet. A coinstake is
-  only found when block times are spaced, so every block, at bootstrap and through
-  `POST /1/r/generate`, is generated at mocktime `max(tip + 60, now)`. On a fresh chain the first
-  block is backdated, so the tip ends near the current time.
+- **Proof of stake.** Blocks after height 89 are PoS, staked by the node's wallet under mocktime.
+  Staking needs chain time to pass, so every block, at bootstrap and through `POST /1/r/generate`,
+  is at least 60 s after its parent (`max(tip + 60, now)`), and staking is retried further ahead
+  when no coinstake is found. On a fresh chain the first block is backdated, so the tip ends near
+  the current time.
+- **Chain time runs ahead of the wall clock** once many blocks are mined quickly (60 s per block).
+  Derive lock times from the chain tip (`/1/b/best/header`), not the local clock.
 - **Soft forks.** CSV, segwit and taproot are `NEVER_ACTIVE` on Reddcoin (mainnet included).
   The compose file activates them on regtest with `-vbparams`, and bootstrap fails unless
   `REQUIRE_DEPLOYMENTS` (default `cltv csv segwit taproot`) are active. Tests that use them

@@ -1,8 +1,10 @@
 // Brings a fresh Reddcoin regtest chain to BOOTSTRAP_HEIGHT and produces all
-// later blocks. Past nLastPowHeight (89) blocks are proof-of-stake: the wallet
-// only finds a valid coinstake if block times are spaced, so every block is
-// generated at mocktime = max(tip + SPACING, now). On a fresh chain the first
-// block starts SPACING * height seconds in the past, so the tip ends near now.
+// later blocks. Past nLastPowHeight (89) blocks are proof-of-stake, staked by
+// the node's wallet under mocktime; staking needs chain time to pass, so every
+// block is at least SPACING after its parent. The bootstrap backfills from
+// SPACING * height seconds ago so the tip ends near now; later blocks are at
+// max(tip + SPACING, now). Mining many blocks therefore runs chain time ahead
+// of the wall clock: clients should take lock times from the chain tip.
 let debug = require('debug')('bootstrap')
 let rpc = require('./rpc')
 
@@ -44,6 +46,22 @@ async function ensureWallet () {
 // one generation at a time: mocktime is node-global
 let queue = Promise.resolve()
 
+// The wallet may not find a coinstake at a given time (coins too young, or
+// staked outputs still maturing). Let time pass instead: retry with mocktime
+// moved further ahead, doubling each try (60 s, 120 s, ...).
+async function stake (time, address) {
+  for (let attempt = 0; ; attempt++) {
+    let at = attempt ? time + SPACING * 2 ** (attempt - 1) : time
+    await call('setmocktime', at)
+    try {
+      return await call('generatetoaddress', 1, address)
+    } catch (err) {
+      if (!/no valid coinstake/.test(err.message) || attempt >= 12) throw err
+      debug(`no coinstake at ${at}, retrying ${SPACING * 2 ** attempt}s later`)
+    }
+  }
+}
+
 // backfillFrom: generate blocks SPACING apart starting at that time (bootstrap),
 // rather than catching up to the wall clock
 function generate (count, address, backfillFrom) {
@@ -52,10 +70,10 @@ function generate (count, address, backfillFrom) {
     let hashes = []
     for (let i = 0; i < count; i++) {
       let tip = await call('getblockheader', await call('getbestblockhash'))
-      let floor = backfillFrom ? (i === 0 ? backfillFrom : 0) : now()
-      let time = Math.max(tip.time + SPACING, floor)
-      await call('setmocktime', time)
-      hashes.push(...await call('generatetoaddress', 1, address))
+      let time = backfillFrom
+        ? Math.max(tip.time + SPACING, i === 0 ? backfillFrom : 0)
+        : Math.max(tip.time + SPACING, now())
+      hashes.push(...await stake(time, address))
     }
     return hashes
   })
