@@ -1,0 +1,45 @@
+# Reddcoin regtest node + regtest-server API, for regtest-client integration tests.
+#
+#   docker compose up -d --wait     # returns once the API reports ready (~1 min)
+#   curl http://127.0.0.1:8080/1/b/best/height
+#
+# RPC credentials are for a throwaway local regtest chain only.
+services:
+  reddcoind:
+    image: ${REDDCOIND_IMAGE:-reddcoincore/reddcoind:v4.22.9.5}
+    command:
+      - reddcoind
+      - -regtest
+      - -server
+      - -txindex
+      - -printtoconsole
+      - -rpcuser=regtest
+      - -rpcpassword=regtest
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -rpcworkqueue=32
+      - -zmqpubhashtx=tcp://0.0.0.0:28332
+      - -zmqpubhashblock=tcp://0.0.0.0:28332
+      # Reddcoin's relay fee is 100x Bitcoin's; keep test amounts workable
+      - -minrelaytxfee=0.00001
+      - -mintxfee=0.00001
+      - -fallbackfee=0.0002
+      # CSV, segwit and taproot are NEVER_ACTIVE on Reddcoin; activate them on regtest
+      - -vbparams=csv:0:9223372036854775807
+      - -vbparams=segwit:0:9223372036854775807
+      - -vbparams=taproot:0:9223372036854775807
+
+  regtest-server:
+    image: ${SERVER_IMAGE:-reddcoincore/reddcoinjs-regtest-server:local}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    depends_on:
+      - reddcoind
+    environment:
+      RPC: http://reddcoind:56443
+      RPCAUTH: regtest:regtest
+      ZMQ: tcp://reddcoind:28332
+      DEBUG: bootstrap,service
+    ports:
+      - "127.0.0.1:8080:8080"
