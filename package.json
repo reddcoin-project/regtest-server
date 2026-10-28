@@ -1,32 +1,38 @@
 {
   "name": "regtest-server",
-  "version": "1.0.0",
-  "description": "",
+  "version": "2.0.0",
+  "description": "Reddcoin regtest HTTP API for regtest-client based integration tests",
   "private": true,
   "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bitcoinjs/regtest-server.git"
+    "url": "git+https://github.com/reddcoin-project/regtest-server.git"
   },
   "author": "",
   "license": "BSD3",
   "bugs": {
-    "url": "https://github.com/bitcoinjs/regtest-server/issues"
+    "url": "https://github.com/reddcoin-project/regtest-server/issues"
   },
-  "homepage": "https://github.com/bitcoinjs/regtest-server#readme",
+  "homepage": "https://github.com/reddcoin-project/regtest-server#readme",
   "dependencies": {
-    "bitcoinjs-lib": "^5.2.0",
+    "@reddcoinproject/reddcoinjs-lib": "^7.0.1",
+    "body-parser": "^1.20.2",
     "cors": "^2.8.5",
     "debug": "^4.3.4",
     "debug-ware": "^1.2.10",
     "easy-express-api": "^2.0.5",
-    "indexd": "^0.9.1",
+    "ecpair": "^3.0.0",
+    "indexd": "git+https://github.com/reddcoin-project/indexd.git#cabf35fedc13fc4ce65eaf0c05e1c32c3357b04b",
     "leveldown": "^6.1.1",
     "run-parallel": "^1.2.0",
+    "tiny-secp256k1": "^2.2.3",
     "typeforce": "^1.18.0",
     "yajrpc": "^1.4.4",
     "zeromq": "^5.3.1"

@@ -1,4 +1,4 @@
-let bitcoin = require('bitcoinjs-lib')
+let { rdd, addressOf } = require('../reddcoin')
 let leveldown = require('leveldown')
 let Indexd = require('indexd')
 let rpc = require('../rpc')
@@ -28,9 +28,8 @@ db.open({}, (err) => {
       if (err) return
 
       let extra = {}
-      try {
-        extra.address = bitcoin.address.fromOutputScript(txo.script, bitcoin.networks.testnet)
-      } catch (e) { extra.asm = bitcoin.script.toASM(txo.script) }
+      extra.address = addressOf(txo.script)
+      if (!extra.address) extra.asm = rdd.script.toASM(txo.script)
       extra.script = txo.script.toString('hex')
 
       debug('ST', y, Object.assign(key, value, txo, extra))

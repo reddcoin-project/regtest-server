@@ -20,4 +20,7 @@ require('easy-express-api')({
     process.exit(-1);
   }
   server.listen(process.env.PORT)
+
+  // Wallet + chain bootstrap runs in the background; GET /1/ready reports it
+  require('./bootstrap').run()
 })

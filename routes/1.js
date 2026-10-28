@@ -1,17 +1,18 @@
 let { get: indexd } = require('../service')
 let bodyParser = require('body-parser')
-let bitcoin = require('bitcoinjs-lib')
 let debug = require('debug')('1')
+let ecc = require('tiny-secp256k1')
+let { ECPairFactory } = require('ecpair')
 let fs = require('fs')
 let parallel = require('run-parallel')
 let rpc = require('../rpc')
+let bootstrap = require('../bootstrap')
 let typeforce = require('typeforce')
+let { rdd, NETWORK, sha256Hex, jsonValue, addressOf } = require('../reddcoin')
 let isHex64 = typeforce.HexN(64)
 
+let ECPair = ECPairFactory(ecc)
 let DBLIMIT = 440 // max sequential leveldb walk
-let NETWORK = bitcoin.networks.regtest
-
-let sleep = ms => new Promise(r => setTimeout(r, ms))
 
 let pRpc = (cmd, args) => new Promise((resolve, reject) => {
   rpc(cmd, args, (err, data) => {
@@ -29,26 +30,34 @@ let pUtxosByScriptRange = scId => new Promise((resolve, reject) => {
   })
 })
 
-function rpcJSON2CB (tx) {
+// indexd returns bigint values; JSON needs numbers (or strings above 2^53)
+function txosJSON (txos) {
+  return txos.map(txo => Object.assign({}, txo, { value: jsonValue(txo.value) }))
+}
+
+// Parsed from the raw transaction, so values are exact (verbose RPC JSON is not)
+function txJSON (hex) {
+  let tx = rdd.Transaction.fromHex(hex)
   return {
-    txId: tx.txid,
-    txHex: tx.hex,
-    vsize: tx.vsize,
+    txId: tx.getId(),
+    txHex: hex,
+    vsize: tx.virtualSize(),
     version: tx.version,
     locktime: tx.locktime,
-    ins: tx.vin.map((x) => {
+    nTime: tx.nTime,
+    ins: tx.ins.map((x) => {
       return {
-        txId: x.txid,
-        vout: x.vout,
-        script: x.scriptSig.hex,
+        txId: Buffer.from(x.hash).reverse().toString('hex'),
+        vout: x.index,
+        script: Buffer.from(x.script).toString('hex'),
         sequence: x.sequence
       }
     }),
-    outs: tx.vout.map((x) => {
+    outs: tx.outs.map((x) => {
       return {
-        address: x.scriptPubKey.addresses ? x.scriptPubKey.addresses[0] : x.scriptPubKey.address ? x.scriptPubKey.address : undefined,
-        script: x.scriptPubKey.hex,
-        value: Math.round(x.value * 1e8) // satoshis
+        address: addressOf(x.script),
+        script: Buffer.from(x.script).toString('hex'),
+        value: jsonValue(x.value)
       }
     })
   }
@@ -58,13 +67,17 @@ module.exports = function (router, callback) {
   function addressWare (req, res, next) {
     const { address } = req.params
     try {
-      let script = !address.match(/^[0-9a-f]+$/i) ?
-        bitcoin.address.toOutputScript(address, NETWORK) :
-        Buffer.from(address, 'hex')
-      req.params.scId = bitcoin.crypto.sha256(script).toString('hex')
+      let script = !address.match(/^[0-9a-f]+$/i)
+        ? rdd.address.toOutputScript(address, NETWORK)
+        : Buffer.from(address, 'hex')
+      req.params.scId = sha256Hex(script)
     } catch (e) { return res.easy(400) }
     next()
   }
+
+  router.get('/ready', (req, res) => {
+    res.status(bootstrap.state.ready ? 200 : 503).json(bootstrap.state)
+  })
 
   router.get('/a/:address/firstseen', addressWare, (req, res) => {
     let { scId } = req.params
@@ -73,8 +86,6 @@ module.exports = function (router, callback) {
 
   router.get('/a/:address/txs', addressWare, (req, res) => {
     let { scId } = req.params
-    let height = parseInt(req.query.height)
-    if (!Number.isFinite(height)) height = 0
 
     indexd().transactionIdsByScriptRange({
       scId, heightRange: [0, 0xffffffff], mempool: true
@@ -89,8 +100,6 @@ module.exports = function (router, callback) {
 
   router.get('/a/:address/txids', addressWare, (req, res) => {
     let { scId } = req.params
-    let height = parseInt(req.query.height)
-    if (!Number.isFinite(height)) height = 0
 
     indexd().transactionIdsByScriptRange({
       scId, heightRange: [0, 0xffffffff], mempool: true
@@ -101,14 +110,14 @@ module.exports = function (router, callback) {
     let { scId } = req.params
     indexd().txosByScriptRange({
       scId, heightRange: [0, 0xffffffff], mempool: true
-    }, DBLIMIT, res.easy)
+    }, DBLIMIT, (err, txos) => res.easy(err, txos && txosJSON(txos)))
   })
 
   router.get('/a/:address/unspents', addressWare, (req, res) => {
     let { scId } = req.params
     indexd().utxosByScriptRange({
       scId, heightRange: [0, 0xffffffff], mempool: true
-    }, DBLIMIT, res.easy)
+    }, DBLIMIT, (err, utxos) => res.easy(err, utxos && txosJSON(utxos)))
   })
 
   router.get('/a/alt/:address/unspents', addressWare, async (req, res) => {
@@ -116,21 +125,22 @@ module.exports = function (router, callback) {
     try {
       let { scId } = req.params
       const unspents = await pUtxosByScriptRange(scId)
-      const results = unspents.map(unspent => {
-        const script = !!unspent.address
-          ? bitcoin.address.toOutputScript(unspent.address, NETWORK)
-          : null
+      const results = await Promise.all(unspents.map(async (unspent) => {
+        const txo = await new Promise((resolve, reject) => indexd().txoByTxo(unspent, (err, txo) => err ? reject(err) : resolve(txo)))
+        const address = txo && addressOf(txo.script)
         return {
-          value_int: unspent.value,
+          value_int: jsonValue(unspent.value),
           txid: unspent.txId,
           n: unspent.vout,
-          ...(!unspent.address ? {} : { addresses: [unspent.address] }),
-          ...(!unspent.address ? {} : { script_pub_key: {
-            asm: bitcoin.script.toASM(script),
-            hex: script.toString('hex')
-          } }),
+          ...(!address ? {} : { addresses: [address] }),
+          ...(!txo ? {} : {
+            script_pub_key: {
+              asm: rdd.script.toASM(txo.script),
+              hex: txo.script.toString('hex')
+            }
+          })
         }
-      })
+      }))
       res.easy(undefined, results)
     } catch (err) {
       res.easy(err)
@@ -166,10 +176,10 @@ module.exports = function (router, callback) {
   })
 
   router.get('/t/:id/json', hexWare, (req, res) => {
-    rpc('getrawtransaction', [req.params.id, true], (err, json) => {
+    rpc('getrawtransaction', [req.params.id, false], (err, hex) => {
       if (err) return res.easy(err)
 
-      res.easy(null, rpcJSON2CB(json))
+      res.easy(null, txJSON(hex))
     })
   })
 
@@ -228,64 +238,60 @@ module.exports = function (router, callback) {
   // regtest features
   function authMiddleware (req, res, next) {
     if (!req.query.key) return res.easy(401)
-    let hash = bitcoin.crypto.sha256(req.query.key).toString('hex')
+    let hash = sha256Hex(req.query.key)
     if (hash in AUTH_KEYS) return next()
     res.easy(401)
   }
 
+  // PoS blocks: generated through bootstrap, which manages mocktime so the
+  // wallet can always stake
   router.post('/r/generate', authMiddleware, (req, res) => {
-    if (req.query.address) {
-      rpc('generatetoaddress', [parseInt(req.query.count) || 1, req.query.address], res.easy)
-    } else {
-      rpc('getnewaddress', [], (err, address) => {
-        if (err) return res.easy(err)
-        rpc('generatetoaddress', [parseInt(req.query.count) || 1, address], res.easy)
-      })
-    }
+    let count = parseInt(req.query.count) || 1
+    bootstrap.generate(count, req.query.address).then(
+      hashes => res.easy(null, hashes),
+      err => res.easy(err, err.message)
+    )
   })
 
   router.post('/r/faucet', authMiddleware, (req, res) => {
     rpc('sendtoaddress', [req.query.address, parseInt(req.query.value) / 1e8, '', '', false, false, null, 'unset', false, 1], res.easy)
   })
 
+  // Funds a fresh P2PKH key, then spends it to the requested output script
   router.post('/r/faucetScript', authMiddleware, async (req, res) => {
     try {
-      const key = bitcoin.ECPair.makeRandom({ network: NETWORK })
-      const payment = bitcoin.payments.p2pkh({ pubkey: key.publicKey, network: NETWORK })
-      const address = payment.address
-      const scId = bitcoin.crypto.sha256(payment.output).toString('hex')
+      const value = parseInt(req.query.value)
+      const key = ECPair.makeRandom({ network: NETWORK })
+      const payment = rdd.payments.p2pkh({ pubkey: key.publicKey, network: NETWORK })
 
-      const txId = await pRpc('sendtoaddress', [address, parseInt(req.query.value) * 2 / 1e8, '', '', false, false, null, 'unset', false, 1])
-      let unspent
-      let counter = 10
-      while (!unspent) {
-        const unspents = await pUtxosByScriptRange(scId)
-        unspent = unspents.filter(x => x.txId === txId)[0]
-        if (!unspent) {
-          counter--
-          if (counter <= 0) throw new Error('No outputs')
-          await sleep(10)
-        }
-      }
-      const txvb = new bitcoin.TransactionBuilder(NETWORK);
-      txvb.addInput(unspent.txId, unspent.vout, undefined, payment.output);
-      txvb.addOutput(Buffer.from(req.query.script, 'hex'), parseInt(req.query.value));
-      txvb.sign(0, key);
-      const txv = txvb.build();
-      await pRpc('sendrawtransaction', [txv.toHex()])
-      res.easy(undefined, txv.getId())
+      const fundId = await pRpc('sendtoaddress', [payment.address, value * 2 / 1e8, '', '', false, false, null, 'unset', false, 1])
+      const fund = rdd.Transaction.fromHex(await pRpc('getrawtransaction', [fundId, false]))
+      const vout = fund.outs.findIndex(o => Buffer.from(o.script).equals(Buffer.from(payment.output)))
+      if (vout < 0) throw new Error('No outputs')
+
+      const tx = new rdd.Transaction()
+      tx.version = 2
+      tx.nTime = Math.floor(Date.now() / 1000)
+      tx.addInput(fund.getHash(), vout)
+      tx.addOutput(Buffer.from(req.query.script, 'hex'), BigInt(value))
+      const hash = tx.hashForSignature(0, payment.output, rdd.Transaction.SIGHASH_ALL)
+      const signature = rdd.script.signature.encode(key.sign(hash), rdd.Transaction.SIGHASH_ALL)
+      tx.setInputScript(0, rdd.script.compile([signature, key.publicKey]))
+
+      await pRpc('sendrawtransaction', [tx.toHex()])
+      res.easy(undefined, tx.getId())
     } catch (err) {
       res.easy(err)
     }
   })
 
   if (!process.env.KEYDB) {
-    console.log("KEYDB is not set");
-    process.exit(-1);
+    console.log('KEYDB is not set')
+    process.exit(-1)
   } else {
     if (!fs.existsSync(process.env.KEYDB)) {
-      console.log(`${process.env.KEYDB} file does not exist`);
-      process.exit(-1);
+      console.log(`${process.env.KEYDB} file does not exist`)
+      process.exit(-1)
     }
     fs.readFile(process.env.KEYDB, (err, buffer) => {
       if (err) return callback(err)
@@ -293,7 +299,7 @@ module.exports = function (router, callback) {
         .toString('utf8')
         .split('\n')
         .filter(x => x)
-        .map(x => bitcoin.crypto.sha256(x).toString('hex')) // XXX: yes, from plain-text :)
+        .map(x => sha256Hex(x)) // XXX: yes, from plain-text :)
         .forEach(x => (AUTH_KEYS[x] = true))
       debug(`imported ${Object.keys(AUTH_KEYS).length} authorized keys`.toUpperCase())
       callback()
